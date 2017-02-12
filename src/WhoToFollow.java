@@ -16,51 +16,86 @@ import java.util.function.Predicate;
 
 public class WhoToFollow {
 
-    /**
-     * *****************
-     */
-    /**
-     * Mapper      *
-     */
-    /**
-     * *****************
-     */
-    public static class AllPairsMapper extends Mapper<Object, Text, IntWritable, IntWritable> {
+    /*
+    ** First Round Mapper - Indexing
+    */
+    public static class IndexingMapper extends Mapper<Object, Text, IntWritable, IntWritable> {
 
         public void map(Object key, Text values, Context context) throws IOException, InterruptedException {
             StringTokenizer st = new StringTokenizer(values.toString());
-            IntWritable user = new IntWritable(Integer.parseInt(st.nextToken()));
-            // 'friends' will store the list of friends of user 'user'
-            ArrayList<Integer> friends = new ArrayList<>();
-            // First, go through the list of all friends of user 'user' and emit
-            // (user,-friend)
-            // 'friend1' will be used in the emitted pair
+
+            IntWritable k = new IntWritable(Integer.parseInt(st.nextToken()));
             IntWritable friend1 = new IntWritable();
-            while (st.hasMoreTokens()) {
+            while(st.hasMoreTokens()) {
                 Integer friend = Integer.parseInt(st.nextToken());
-                friend1.set(-friend);
-                context.write(user, friend1);
-                friends.add(friend); // save the friends of user 'user' for later
-            }
-            // Now we can emit all (a,b) and (b,a) pairs
-            // where a!=b and a & b are friends of user 'user'.
-            // We use the same algorithm as before.
-            ArrayList<Integer> seenFriends = new ArrayList<>();
-            // The element in the pairs that will be emitted.
-            IntWritable friend2 = new IntWritable();
-            for (Integer friend : friends) {
                 friend1.set(friend);
-                for (Integer seenFriend : seenFriends) {
-                    friend2.set(seenFriend);
-                    context.write(friend1, friend2);
-                    context.write(friend2, friend1);
-                }
-                seenFriends.add(friend1.get());
+                context.write(friend1, k);
+                friend1.set(-friend);
+                context.write(k, friend1);
             }
         }
     }
 
-    public static class CountReducer extends Reducer<IntWritable, IntWritable, IntWritable, Text> {
+    /*
+    ** First Round Reducer - Indexing
+    */
+
+    public static class IndexingReducer extends Reducer<IntWritable, IntWritable, IntWritable, Text> {
+
+        // The reduce method
+        public void reduce(IntWritable key, Iterable<IntWritable> values, Context context) throws IOException, InterruptedException {
+
+            StringBuilder sb = new StringBuilder();
+            while(values.iterator().hasNext()) {
+                sb.append(" " + values.iterator().next().toString());
+            }
+            context.write(key, new Text(sb.toString()));
+
+
+        }
+    }
+
+    /*
+    ** Second Round Mapper - Similarity
+    */
+    public static class SimilarityMapper extends Mapper<Object, Text, IntWritable, IntWritable> {
+
+        public void map(Object key, Text values, Context context) throws IOException, InterruptedException {
+            // Key is ignored as it only stores the offset of the line in the text file
+            StringTokenizer st = new StringTokenizer(values.toString());
+            // seenFriends will store the friends we've already seen as we walk through the list of friends
+            ArrayList<Integer> seenFriends = new ArrayList<>();
+            // friend1 and friend2 will be the elements in the emitted pairs.
+            IntWritable friend1 = new IntWritable();
+            IntWritable friend2 = new IntWritable();
+            String k = st.nextToken(); // discards first token (key)
+            while (st.hasMoreTokens()) {
+                Integer i = Integer.parseInt(st.nextToken());
+                // if token < 0 => save the origin value
+                if(i > 0) {
+                    // For every friend Fi found in the values,
+                    // we emit (Fi,Fj) and (Fj,Fi) for every Fj in the
+                    // friends we have seen before. You can convince yourself
+                    // that this will emit all (Fi,Fj) pairs for i!=j.
+                    friend1.set(i);
+                    for (Integer seenFriend : seenFriends) {
+                        friend2.set(seenFriend);
+                        context.write(friend1, friend2);
+                        context.write(friend2, friend1);
+                    }
+                    seenFriends.add(friend1.get());
+                } else {
+                    context.write(new IntWritable(Integer.parseInt(k)), new IntWritable(i));
+                }
+
+            }
+        }
+    }
+
+    /*
+    ** Second Round Reducer - Similarity
+    */
+    public static class SimilarityReducer extends Reducer<IntWritable, IntWritable, IntWritable, Text> {
 
         // A private class to describe a recommendation.
         // A recommendation has a friend id and a number of friends in common.
@@ -168,14 +203,30 @@ public class WhoToFollow {
 
     public static void main(String[] args) throws IOException, InterruptedException, ClassNotFoundException {
         Configuration conf = new Configuration();
-        Job job = Job.getInstance(conf, "people you may know");
+        Configuration conf2 = new Configuration();
+
+
+        Job job = Job.getInstance(conf, "who to follow - 1");
         job.setJarByClass(WhoToFollow.class);
-        job.setMapperClass(AllPairsMapper.class);
-        job.setReducerClass(CountReducer.class);
+
+        Job job2 = Job.getInstance(conf2, "who to follow - 2");
+        job2.setJarByClass(WhoToFollow.class);
+
+
+        job.setMapperClass(IndexingMapper.class);
+        job.setReducerClass(IndexingReducer.class);
         job.setOutputKeyClass(IntWritable.class);
         job.setOutputValueClass(IntWritable.class);
         FileInputFormat.addInputPath(job, new Path(args[0]));
-        FileOutputFormat.setOutputPath(job, new Path(args[1]));
-        System.exit(job.waitForCompletion(true) ? 0 : 1);
+        FileOutputFormat.setOutputPath(job, new Path("output"));
+        job.waitForCompletion(true);
+
+        job2.setMapperClass(SimilarityMapper.class);
+        job2.setReducerClass(SimilarityReducer.class);
+        job2.setOutputKeyClass(IntWritable.class);
+        job2.setOutputValueClass(IntWritable.class);
+        FileInputFormat.addInputPath(job2, new Path("output"));
+        FileOutputFormat.setOutputPath(job2, new Path(args[1]));
+        job2.waitForCompletion(true);
     }
 }
